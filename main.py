@@ -1,352 +1,135 @@
-import pygetwindow as gw
-from pygetwindow import Win32Window
-import mouse
-from mouse import LEFT
-import keyboard as kb
-import time
-import mss
-import numpy as np
-import math
-import ctypes
-import threading
-import sys
-import json
+"""
+bot_min.py  –  simplest reliable Instagram brick‑breaker bot
+  • holds left‑click continuously
+  • pure analytic path solver (handles any number of side bounces)
+  • constant‑latency lead (default 25 ms)
+
+Requirements: opencv‑python mss numpy mouse keyboard pygetwindow
+"""
+
+import time, json, threading, sys, ctypes, math
 from collections import deque
+import numpy as np
+import cv2, mss, mouse, keyboard as kb, pygetwindow as gw
+from pygetwindow import Win32Window
 
-que = deque()
+# ─────────── config ─────────── #
+with open("config.json") as f:
+    CFG = json.load(f)
 
-with open('config.json') as file:
-    config = json.load(file)
+WIN_W, WIN_H   = CFG["window_width"], CFG["window_height"]
+TITLE          = CFG["window_title"]
 
-window_title = config['window_title']
-window_width = config['window_width']
-window_height = config['window_height']
+LEFT, RIGHT    = 19, WIN_W - 19
+TOP            = 54
+PADDLE_LINE    = WIN_H - 90 - 65          # centre of paddle
+PADDLE_WIDTH   = 110                      # measure once, tweak here
+BALL_R         = 20                       # px radius
 
-ball_width = 40
-platform_height = 65
+# HSV thresholds for the red ball (two ranges because hue wraps)
+HSV1_LO, HSV1_HI = (  0,120,120), (10,255,255)
+HSV2_LO, HSV2_HI = (170,120,120), (180,255,255)
 
+LATENCY_SEC    = 0.025                    # 25 ms lead; adjust for your PC
+# ─────────────────────────────── #
 
-left_boundary = 19
-right_boundary = window_width - 19
-top_boundary = 54
-bottom_boundary = window_height - 90
+frames = deque(maxlen=2)
 
-HWND_TOP = 0
-SWP_NOSENDCHANGING = 0x0400
+# ——— window helpers ——— #
+def get_game_window() -> Win32Window:
+    for w in gw.getAllWindows():
+        if TITLE in w.title:
+            Win32Window(w._hWnd).activate()
+            return Win32Window(w._hWnd)
+    sys.exit("❌  Window not found – check TITLE in config.json")
 
-# Set window position
-def set_window_pos(window_handle, x, y, width, height):
-    ret = ctypes.windll.user32.SetWindowPos(
-        window_handle,
-        HWND_TOP,
-        x,
-        y,
-        width,
-        height,
-        SWP_NOSENDCHANGING
-    )
-    return ret
+# ——— vision helpers ——— #
+kernel5 = np.ones((5,5), np.uint8)
+def detect_ball(img):
+    hsv  = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, HSV1_LO, HSV1_HI) | cv2.inRange(hsv, HSV2_LO, HSV2_HI)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel5)
+    cnts,_ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts: return None
+    (x,y),_ = cv2.minEnclosingCircle(max(cnts, key=cv2.contourArea))
+    return float(x), float(y)
 
-def init():
-    all_windows = gw.getAllWindows()
-    for w in all_windows:
-        if window_title in w.title:
-            break
-    
-    if window_title not in w.title:
-        print('No Instagram window found')
-        return None
-    
+# ——— maths ——— #
+FIELD_W = RIGHT - LEFT
+def reflect_x(x):
+    """Mirror x into [LEFT,RIGHT] with elastic side‑walls."""
+    d   = x - LEFT
+    mod = d % (2*FIELD_W)
+    return LEFT + (2*FIELD_W - mod if mod > FIELD_W else mod)
 
-    window = Win32Window(w._hWnd)
-    window.activate()
+# ——— threads ——— #
+def capture_loop(win):
+    region = {"left":win.topleft.x, "top":win.topleft.y,
+              "width":WIN_W, "height":WIN_H}
+    with mss.mss() as sct:
+        while not kb.is_pressed("space"):
+            frames.appendleft(np.array(sct.grab(region))[:,:,:3])
 
-    print(window.size)
-    time.sleep(0.2)
+def play_loop(win):
+    prev_x = prev_y = None
+    while not kb.is_pressed("space"):
+        if not frames:
+            time.sleep(0.002); continue
+        img = frames.pop()
+        ball = detect_ball(img)
+        if not ball: continue
+        bx, by = ball
 
-    mouse.move(
-        x=window.topleft.x + window_width // 2,
-        y=window.topleft.y + window_height - 65,
-    )
-    mouse.press(LEFT)
-    time.sleep(0.2)
-    mouse.release(LEFT)
-
-    time.sleep(0.2)
-
-    mouse.press(LEFT)
-
-
-    return window
-
-def rgb_ansi_text(text, r, g, b):
-    return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
-
-
-def get_screenshot(window):
-    while True:
-        if kb.is_pressed('space'):
-            return
-
-        region = {
-            "top": window.topleft.y,
-            "left": window.topleft.x,
-            "width": window_width,
-            "height": window_height
-        }
-
-        with mss.mss() as sct:
-            screenshot = sct.grab(region)
-            screenshot = np.array(screenshot)[:, :, :3]
-
-        que.appendleft(screenshot)
-
-# Calculate the reflected point of the ball
-# From reflected coordinate to original coordinate
-def forward_wall(walls, x, y):
-    for wall in walls:
-        if wall == 'L':
-            x = 2 * left_boundary - x
-        elif wall == 'R':
-            x = 2 * right_boundary - x
-        elif wall == 'T':
-            y = 2 * top_boundary - y
-    return x, y
-# From original coordinate to reflected coordinate
-def reverse_wall(walls, x, y):
-    for wall in walls[::-1]:
-        if wall == 'L':
-            x = 2 * left_boundary - x
-        elif wall == 'R':
-            x = 2 * right_boundary - x
-        elif wall == 'T':
-            y = 2 * top_boundary - y
-    return x, y
-
-def predict(window):
-    prev_dir = 'up'
-    prev = [float('inf'), float('inf')]
-    sequence = []
-    reflected = []
-    walls = []
-    prev_reflected = []
-    prev_prev_reflected = []
-    prev_time = time.time()
-
-    target = np.array([255, 83, 53])
-    target = np.array([53, 83, 255])
-
-    times = []
-
-    # Main loop
-    while True:
-        if kb.is_pressed('space'):
-            return
-        
-        if len(que) == 0:
-            time.sleep(0.005)
-            continue
-        else:
-            screenshot = que.pop()
-
-        # Get the coordinates of the ball
-        diff = screenshot - target
-        squared_diff = np.sum(diff ** 2, axis=-1)
-        mask = squared_diff < 20
-
-        image_y, image_x = np.where(mask)
-
-        if len(image_x) < 50 or len(image_y) < 50:
-            # print('No ball found')
+        if prev_x is None:                 # need two points for velocity
+            prev_x, prev_y = bx, by
             continue
 
-        image_x.sort()
-        image_y.sort()
-
-        image_x = image_x[2:-2]
-        image_y = image_y[2:-2]
-
-        x_max = image_x[-1]
-        x_min = image_x[0]
-        y_max = image_y[-1]
-        y_min = image_y[0]
-
-        if x_max - x_min > 42 or y_max - y_min > 42 or x_max - x_min < 30 or y_max - y_min < 30:
+        vx, vy = bx - prev_x, by - prev_y
+        prev_x, prev_y = bx, by
+        if abs(vx)+abs(vy) < 1:            # ball nearly stopped
             continue
 
-        if len(image_x) > 0 and len(image_y) > 0:
-            ball_x = (x_max + x_min) // 2
-            ball_y = (y_max + y_min) // 2
-        else:
-            ball_x, ball_y = [window_width // 2, window_height // 2]
+        # vertical distance still to travel until paddle
+        if vy > 0:                         # ball already descending
+            dy_down   = PADDLE_LINE - by
+            total_dy  = dy_down
+        else:                              # ball ascending first
+            dy_up     = by - TOP
+            dy_down   = PADDLE_LINE - TOP
+            total_dy  = dy_up + dy_down
 
-        if abs(ball_x - prev[0]) < 5 and abs(ball_y - prev[1]) < 5:
-            continue
+        if vy == 0: continue               # avoid division by 0
+        time_to_paddle = total_dy / abs(vy)
 
+        # lead compensation (constant LATENCY_SEC)
+        lead_x = vx * (time_to_paddle + LATENCY_SEC)
 
-        # Calculate the reflected coordinate of the ball
-        if ball_y > prev[1] or (ball_y == prev[1] and prev_dir == 'up'):
-            prev_dir = 'down'
-        else:
-            if prev_dir == 'down':
-                # print()
-                x = reflected[-1][0]
-                while x < left_boundary or x > right_boundary:
-                    if x < left_boundary:
-                        x = 2 * left_boundary - x
-                    elif x > right_boundary:
-                        x = 2 * right_boundary - x
-                y = reflected[-1][1]
-                y = 2 * top_boundary - y
-                y = 2 * bottom_boundary - y
-                offset = [x - reflected[-1][0], y - reflected[-1][1]]
-                prev_prev_reflected = [[x + offset[0], y + offset[1]] for x, y in (prev_reflected + reflected)[:-1]]
-                prev_reflected = [[x + offset[0], y + offset[1]] for x, y in (reflected)[:-1]]
-                if len(prev_reflected) > 100:
-                    prev_reflected = prev_reflected[-50:]
-                if len(prev_prev_reflected) > 100:
-                    prev_prev_reflected = prev_prev_reflected[-50:]
-                sequence = []
-                reflected = []
-                walls = []
-            prev_dir = 'up'
-        
-        sequence.append([ball_x, ball_y])
+        raw_hit_x = bx + lead_x
+        hit_x     = reflect_x(raw_hit_x)
 
-        if len(sequence) > 3:
-            if m != 0:
-                reflected_y = sequence[-1][1] if 'T' not in walls else 2 * top_boundary - sequence[-1][1]
-                predicted_x = m * (reflected_y) + b
+        # centre paddle
+        target = int(hit_x - PADDLE_WIDTH/2)
+        target = max(LEFT, min(RIGHT-PADDLE_WIDTH, target))
+        mouse.move(
+            win.topleft.x + target + PADDLE_WIDTH//2,
+            win.topleft.y + WIN_H//2,
+            absolute=True
+        )
 
-                predicted_x, _ = forward_wall(walls, predicted_x, 0)
-                # print(predicted_x)
-                if predicted_x < left_boundary and sequence[-1][0] - predicted_x > ball_width:
-                   walls.append('L')
-                if predicted_x > right_boundary and predicted_x - sequence[-1][0] > ball_width:
-                    walls.append('R')
+def main():
+    win = get_game_window()
 
-            if sequence[-3][0] > sequence[-2][0] and sequence[-2][0] <= sequence[-1][0]:
-                walls.append('L')
-            if sequence[-3][0] < sequence[-2][0] and sequence[-2][0] >= sequence[-1][0]:
-                walls.append('R')
-            
-            if len(walls) > 1 and walls[-1] == walls[-2]:
-                walls.pop()
+    # click once to start game, then hold paddle
+    mouse.move(win.topleft.x+WIN_W//2, win.topleft.y+WIN_H-65)
+    mouse.click()
+    mouse.press()                          # hold left click entire session
 
-            if m != 0:
-                reflected_x, _ = reverse_wall(walls, sequence[-1][0], 0)
-                predicted_y = (reflected_x - b) / m
+    th_cap = threading.Thread(target=capture_loop, args=(win,), daemon=True)
+    th_play= threading.Thread(target=play_loop,   args=(win,), daemon=True)
+    th_cap.start(); th_play.start()
+    th_cap.join();  th_play.join()
 
-                if predicted_y < top_boundary:
-                    if 'T' not in walls:
-                        walls.append('T')
-            
-            if sequence[-3][1] > sequence[-2][1] and sequence[-2][1] <= sequence[-1][1]:
-                if 'T' not in walls:
-                    walls.append('T')
-            
-            if len(walls) > 1 and walls[-1] == walls[-2]:
-                walls.pop()
-            
-            reflected_x, reflected_y = reverse_wall(walls, sequence[-1][0], sequence[-1][1])
-            reflected.append([reflected_x, reflected_y])
-        else:
-            reflected.append([ball_x, ball_y])
-
-        prev = [ball_x, ball_y]
-
-        
-        # Predict the next position of the ball using linear regression
-        if len(reflected) > 2:
-            if len(prev_reflected) > 2:
-                if reflected[-1][0] > reflected[0][0] and prev_reflected[-1][0] < prev_reflected[0][0]:
-                    prev_reflected = [[2 * reflected[0][0] - x, y] for x, y in prev_reflected]
-                    prev_prev_reflected = [[2 * reflected[0][0] - x, y] for x, y in prev_prev_reflected]
-                elif reflected[-1][0] < reflected[0][0] and prev_reflected[-1][0] > prev_reflected[0][0]:
-                    prev_reflected = [[2 * reflected[0][0] - x, y] for x, y in prev_reflected]
-                    prev_prev_reflected = [[2 * reflected[0][0] - x, y] for x, y in prev_prev_reflected]
-            
-                X = np.array([y for _, y in (prev_reflected + reflected)])
-                y = np.array([x for x, _ in (prev_reflected + reflected)])
-            else:
-                X = np.array([y for _, y in (reflected)])
-                y = np.array([x for x, _ in (reflected)])
-
-            m, b = np.polyfit(X, y, 1)
-
-            predicted_x = m * (2 * top_boundary - bottom_boundary) + b
-
-
-            while predicted_x < left_boundary or predicted_x > right_boundary:
-                if predicted_x < left_boundary:
-                    predicted_x = 2 * left_boundary - predicted_x
-                elif predicted_x > right_boundary:
-                    predicted_x = 2 * right_boundary - predicted_x
-
-            predicted_x = max(left_boundary, min(right_boundary, predicted_x))
-
-            x = window.topleft.x + predicted_x
-            y = window.topleft.y + window_height // 2
-            x = min(max(x, window.topleft.x), window.topleft.x + window_width)
-
-            if not math.isnan(x):
-                mouse.move(x, y, absolute=True)
-        else:
-            m, b = 0, 0
-
-        # Output the information
-        line = ''
-
-        col = 150
-        for j in range(col):
-            x = window_width * j // col
-            y = ball_y
-            if x < x_min or x > x_max:
-                color1 = screenshot[window_height * 3 // 4, window_width * 1 // 4]
-                color2 = screenshot[window_height * 3 // 4, window_width * 2 // 4]
-                color3 = screenshot[window_height * 3 // 4, window_width * 3 // 4]
-
-                mid_b = sorted((color1[0], color2[0], color3[0]))[1]
-                mid_g = sorted((color1[1], color2[1], color3[1]))[1]
-                mid_r = sorted((color1[2], color2[2], color3[2]))[1]
-
-                color = [mid_b, mid_g, mid_r]
-            else:
-                color = target
-            color = [color[2], color[1], color[0]]
-            line += rgb_ansi_text('█', *color)
-
-
-        times.append(time.time() - prev_time)
-        prev_time = time.time()
-        if len(times) > 60:
-            times.pop(0)
-
-        print(line, end = ' ')
-        print("(%3d, %3d)" % (ball_x, ball_y), end = ' ')
-        print(f'fps: {round(len(times) / sum(times))}', end = ' ')
-        print(f'walls: {', '.join(wall for wall in walls)}', end = ' ')
-        print()
-        sys.stdout.flush()
-
-
-def main(window):
-    # Create producer and consumer threads
-    producer_thread = threading.Thread(target=lambda: get_screenshot(window))
-    consumer_thread = threading.Thread(target=lambda: predict(window))
-
-    # Start the threads
-    producer_thread.start()
-    consumer_thread.start()
-
-    # Wait for the threads to finish
-    producer_thread.join()
-    consumer_thread.join()
-
-    mouse.release(LEFT)
-
+    mouse.release()                        # on exit (space)
 
 if __name__ == "__main__":
-    window = init()
-    if window is not None:
-        main(window)
+    main()
