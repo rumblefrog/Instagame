@@ -52,9 +52,3 @@ Python main.py
 ```
 >[!IMPORTANT]  
 > **DO NOT** move your mouse or press any key key on your keyboard after you run the Python script. It should automatically play the game for you.
-   
-## How does it work?
-### Screenshots
-The script continuously captures screenshots and analyzes their colors to determine the ball's position. A higher frame rate provides more data, which enhances the accuracy of the calculations and leads to better scores. However, capturing a screenshot takes significantly longer than the subsequent calculations and is the script's bottleneck. Depending on your hardware, the script can capture around 40 to 50 screenshots per second. On average, it can get to 100 points, and it once got 150. After that, the ball is too fast that the script only has less than 10 frames to predict the next position, which is definitely not enough and it eventually dies.
-### Linear Regression
-Taking reflections into account, the ball's path can be modeled as a straight line. However, due to resolution and other factors, the positions obtained from the screenshots do not align perfectly along a straight line. To address this, the script applies linear regression to fit a straight line to the path and predict the position where the ball will hit the platform.
