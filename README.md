@@ -36,6 +36,12 @@ Ensure the `config.json` file is correctly set up. Here is an example configurat
 ```
 Replace the `window_title` field with the title of `scrcpy` window and set the width and hieght of the window.
 
+## Scrpy example
+Window DPI scaling, resolution can make it inaccurate. I downscaled it to work on 1920x1080 @ 100% scale.
+
+```
+scrcpy.exe --no-audio --window-width=436 --window-height=940 --window-borderless
+```
 
 ## Usage
 1. Ensure your phone screen is being projected to your PC using `scrcpy`.
