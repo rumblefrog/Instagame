@@ -23,7 +23,7 @@ TITLE          = CFG["window_title"]
 LEFT, RIGHT    = 19, WIN_W - 19
 TOP            = 54
 PADDLE_LINE    = WIN_H - 90 - 65          # centre of paddle
-PADDLE_WIDTH   = 100                      # measure once, tweak here
+PADDLE_WIDTH   = 90                      # measure once, tweak here
 BALL_R         = 20                       # px radius
 
 # HSV thresholds for the red ball (two ranges because hue wraps)
