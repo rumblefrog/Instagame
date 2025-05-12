@@ -23,7 +23,7 @@ TITLE          = CFG["window_title"]
 LEFT, RIGHT    = 19, WIN_W - 19
 TOP            = 54
 PADDLE_LINE    = WIN_H - 90 - 65          # centre of paddle
-PADDLE_WIDTH   = 110                      # measure once, tweak here
+PADDLE_WIDTH   = 100                      # measure once, tweak here
 BALL_R         = 20                       # px radius
 
 # HSV thresholds for the red ball (two ranges because hue wraps)
@@ -71,50 +71,60 @@ def capture_loop(win):
             frames.appendleft(np.array(sct.grab(region))[:,:,:3])
 
 def play_loop(win):
-    prev_x = prev_y = None
+    prev = None                      # previous (x,y)
     while not kb.is_pressed("space"):
+
         if not frames:
-            time.sleep(0.002); continue
-        img = frames.pop()
+            time.sleep(0.002)
+            continue
+        img  = frames.pop()
         ball = detect_ball(img)
-        if not ball: continue
+        if not ball:
+            continue
         bx, by = ball
 
-        if prev_x is None:                 # need two points for velocity
-            prev_x, prev_y = bx, by
+        if prev is None:             # need two points to get velocity
+            prev = np.array([bx, by])
             continue
 
-        vx, vy = bx - prev_x, by - prev_y
-        prev_x, prev_y = bx, by
-        if abs(vx)+abs(vy) < 1:            # ball nearly stopped
+        vx, vy = np.array([bx, by]) - prev
+        prev   = np.array([bx, by])
+        speed  = abs(vx) + abs(vy)
+        if speed < 1:                # ignore micro‑movement frames
             continue
 
-        # vertical distance still to travel until paddle
-        if vy > 0:                         # ball already descending
-            dy_down   = PADDLE_LINE - by
-            total_dy  = dy_down
-        else:                              # ball ascending first
-            dy_up     = by - TOP
-            dy_down   = PADDLE_LINE - TOP
-            total_dy  = dy_up + dy_down
+        # vertical distance still to travel until paddle centre
+        if vy > 0:                   # already descending
+            dy_total = PADDLE_LINE - by
+        else:                        # still ascending first
+            dy_total = (by - TOP) + (PADDLE_LINE - TOP)
 
-        if vy == 0: continue               # avoid division by 0
-        time_to_paddle = total_dy / abs(vy)
+        if vy == 0:
+            continue                 # shouldn’t happen, but safety first
 
-        # lead compensation (constant LATENCY_SEC)
-        lead_x = vx * (time_to_paddle + LATENCY_SEC)
+        # horizontal travel:  Δx = vx * (Δy / |vy|)
+        dx = vx * dy_total / abs(vy)
 
-        raw_hit_x = bx + lead_x
-        hit_x     = reflect_x(raw_hit_x)
+        # add fixed latency lead (25 ms default)
+        dx += vx * LATENCY_SEC / (abs(vy) / dy_total)
 
-        # centre paddle
-        target = int(hit_x - PADDLE_WIDTH/2)
-        target = max(LEFT, min(RIGHT-PADDLE_WIDTH, target))
+        raw_hit_x = bx + dx
+        hit_x     = reflect_x(raw_hit_x)      # folds all side bounces
+
+        # centre the paddle under hit_x
+        paddle_left = int(hit_x - PADDLE_WIDTH / 2)
+        paddle_left = max(LEFT, min(RIGHT - PADDLE_WIDTH, paddle_left))
+
+        # guarantee LEFT button is down ☑︎
+        if not mouse.is_pressed(button='left'):
+            mouse.press()
+
         mouse.move(
-            win.topleft.x + target + PADDLE_WIDTH//2,
-            win.topleft.y + WIN_H//2,
-            absolute=True
+            win.topleft.x + paddle_left + PADDLE_WIDTH // 2,
+            win.topleft.y + WIN_H // 2,
+            absolute=True,
         )
+
 
 def main():
     win = get_game_window()
